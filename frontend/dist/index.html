@@ -159,6 +159,28 @@
 
     /* ─── Sentinel ───────────────────────────────── */
     #sentinel { grid-column: 1 / -1; height: 1px; }
+
+    /* ─── コンテキストメニュー ────────────────────── */
+    #ctx-menu {
+      position: fixed; z-index: 9500;
+      background: #1e1e1e; border: 1px solid #333;
+      border-radius: 7px; padding: 4px 0;
+      min-width: 170px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.7);
+      display: none; user-select: none; -webkit-user-select: none;
+    }
+    #ctx-menu.show { display: block; }
+    .ctx-item {
+      padding: 7px 16px; cursor: pointer; font-size: 12px; color: #ccc;
+      white-space: nowrap; transition: background 0.08s;
+    }
+    .ctx-item:hover { background: #2a2a2a; color: #fff; }
+    .ctx-item.danger { color: #ff6b6b; }
+    .ctx-item.danger:hover { background: #3a1010; color: #ff9090; }
+    .ctx-sep { height: 1px; background: #2e2e2e; margin: 4px 0; }
+
+    /* ドラッグ中のカードをやや透明にして掴んでいる感を出す */
+    .card.dragging { opacity: 0.55; }
   </style>
 </head>
 <body>
@@ -200,6 +222,14 @@
       </div>
       <div id="grid"></div>
     </main>
+  </div>
+
+  <!-- 右クリックコンテキストメニュー -->
+  <div id="ctx-menu">
+    <div class="ctx-item" id="ctx-reveal">エクスプローラーで表示</div>
+    <div class="ctx-item" id="ctx-copy-path">パスをコピー</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item danger" id="ctx-delete">削除</div>
   </div>
 
   <script>
@@ -409,7 +439,8 @@
       const card = document.createElement('div');
       card.className = 'card';
       card.title = name;
-      card._url = url; // 共有 observer からアクセス
+      card._url  = url;
+      card._name = name;
 
       const video = document.createElement('video');
       video.muted      = true;
@@ -418,9 +449,39 @@
       video.preload    = 'none';
       card._video = video;
 
-      // マウスオーバーで音声オン/オフ
-      card.addEventListener('mouseenter', () => { video.muted = false; });
-      card.addEventListener('mouseleave', () => { video.muted = true;  });
+      // video 自体がブラウザのデフォルトドラッグ（URL ドラッグ）を発生させないようにする
+      video.addEventListener('dragstart', (e) => e.preventDefault());
+
+      // マウスオーバーで音声オン/オフ（ドラッグ中は変えない）
+      card.addEventListener('mouseenter', () => { if (!card._dragging) video.muted = false; });
+      card.addEventListener('mouseleave', () => { video.muted = true; });
+
+      // ── ドラッグ ─────────────────────────────────
+      card.draggable = true;
+      card.addEventListener('dragstart', (e) => {
+        card._dragging = true;
+        card.classList.add('dragging');
+        video.muted = true;
+
+        // file:// URI を組み立てる（Windows のバックスラッシュをスラッシュに変換）
+        const slash = folderPath.replace(/\\/g, '/');
+        const fileUri = 'file:///' + slash + '/' + name.replace(/ /g, '%20');
+        e.dataTransfer.effectAllowed = 'copy';
+        e.dataTransfer.setData('text/plain',    folderPath + '\\' + name);
+        e.dataTransfer.setData('text/uri-list', fileUri);
+        e.dataTransfer.setDragImage(card, 16, 16);
+      });
+      card.addEventListener('dragend', () => {
+        card._dragging = false;
+        card.classList.remove('dragging');
+      });
+
+      // ── 右クリック ───────────────────────────────
+      card.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showCtxMenu(e.clientX, e.clientY, card);
+      });
 
       // 実際の縦横比が判明したら padding-bottom を更新（これで一切のクリップがなくなる）
       video.addEventListener('loadedmetadata', () => {
@@ -450,6 +511,73 @@
 
     openBtn .addEventListener('click', openFolder);
     emptyBtn.addEventListener('click', openFolder);
+
+    // ── コンテキストメニュー ──────────────────────────
+    const ctxMenu = document.getElementById('ctx-menu');
+    let ctxCard   = null; // 右クリックされたカード
+
+    function showCtxMenu(x, y, card) {
+      ctxCard = card;
+      ctxMenu.style.left = x + 'px';
+      ctxMenu.style.top  = y + 'px';
+      ctxMenu.classList.add('show');
+      // 画面端をはみ出す場合は反対側に出す
+      const r = ctxMenu.getBoundingClientRect();
+      if (r.right  > window.innerWidth)  ctxMenu.style.left = (x - r.width)  + 'px';
+      if (r.bottom > window.innerHeight) ctxMenu.style.top  = (y - r.height) + 'px';
+    }
+
+    function hideCtxMenu() {
+      ctxMenu.classList.remove('show');
+      ctxCard = null;
+    }
+
+    // メニュー外クリックで閉じる
+    document.addEventListener('click',       (e) => { if (!ctxMenu.contains(e.target)) hideCtxMenu(); });
+    document.addEventListener('contextmenu', (e) => { if (!e.target.closest('.card'))  hideCtxMenu(); });
+    document.addEventListener('keydown',     (e) => { if (e.key === 'Escape') hideCtxMenu(); });
+
+    // エクスプローラーで表示
+    document.getElementById('ctx-reveal').addEventListener('click', () => {
+      if (!ctxCard) return;
+      window.go.main.App.RevealInExplorer(ctxCard._name).catch(() => {});
+      hideCtxMenu();
+    });
+
+    // パスをコピー
+    document.getElementById('ctx-copy-path').addEventListener('click', () => {
+      if (!ctxCard) return;
+      const full = folderPath + (folderPath.endsWith('\\') ? '' : '\\') + ctxCard._name;
+      navigator.clipboard.writeText(full).catch(() => {});
+      hideCtxMenu();
+    });
+
+    // 削除
+    document.getElementById('ctx-delete').addEventListener('click', async () => {
+      if (!ctxCard) return;
+      const card = ctxCard;
+      hideCtxMenu();
+
+      if (!confirm(`「${card._name}」を削除しますか？\n\nこの操作は元に戻せません（ゴミ箱には入りません）。`)) return;
+
+      try {
+        await window.go.main.App.DeleteFile(card._name);
+
+        // Observer から外してビデオを解放してから DOM から削除
+        if (loadObs)    loadObs.unobserve(card);
+        if (playObs)    playObs.unobserve(card);
+        if (releaseObs) releaseObs.unobserve(card);
+        const v = card._video;
+        if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+        card.remove();
+
+        totalCount = Math.max(0, totalCount - 1);
+        offset     = Math.max(0, offset     - 1);
+        totalCountEl.textContent = totalCount > 0 ? totalCount + ' 本' : '';
+      } catch (err) {
+        alert('削除に失敗しました:\n' + err);
+      }
+    });
 
     // ── アップデート処理 ──────────────────────────────
     const updateScreen  = document.getElementById('update-screen');

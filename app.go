@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 
@@ -13,8 +15,9 @@ import (
 )
 
 type App struct {
-	ctx         context.Context
-	videoServer *http.Server
+	ctx           context.Context
+	videoServer   *http.Server
+	currentFolder string
 }
 
 func NewApp() *App {
@@ -58,6 +61,7 @@ func (a *App) SelectFolder() string {
 // StartVideoServer closes any prior server, starts a new local HTTP file server
 // for the given folder, and returns the port number.
 func (a *App) StartVideoServer(folderPath string) (int, error) {
+	a.currentFolder = folderPath
 	if a.videoServer != nil {
 		a.videoServer.Close()
 		a.videoServer = nil
@@ -117,6 +121,26 @@ func (a *App) GetVideoFiles(folderPath string, offset, limit int) ([]string, err
 		end = len(names)
 	}
 	return names[offset:end], nil
+}
+
+// DeleteFile permanently deletes the named file from the current folder.
+func (a *App) DeleteFile(filename string) error {
+	return os.Remove(filepath.Join(a.currentFolder, filename))
+}
+
+// RevealInExplorer opens the system file manager and selects the given file.
+func (a *App) RevealInExplorer(filename string) {
+	path := filepath.Join(a.currentFolder, filename)
+	var cmd *exec.Cmd
+	switch goruntime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", "/select,"+path)
+	case "darwin":
+		cmd = exec.Command("open", "-R", path)
+	default:
+		cmd = exec.Command("xdg-open", filepath.Dir(path))
+	}
+	_ = cmd.Start()
 }
 
 // GetTotalVideoCount returns the total count of video files in the folder.
