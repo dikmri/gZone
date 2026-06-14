@@ -179,14 +179,17 @@
     let isLoading   = false;
     let sentinelObs = null;
 
-    // ── 共有 IntersectionObserver（全カードで2つだけ） ──
-    let loadObs = null; // src をセットする（ビューポート手前）
-    let playObs = null; // 再生 / 一時停止（ビューポート内）
+    // ── 共有 IntersectionObserver（3つで全カードを管理） ──
+    let loadObs    = null; // src をセット（ビューポート手前 300px）
+    let playObs    = null; // 再生 / 一時停止（ビューポート内）
+    let releaseObs = null; // 800px 以遠で src を解放 → メモリ返却
 
     function initObservers() {
-      if (loadObs) loadObs.disconnect();
-      if (playObs) playObs.disconnect();
+      if (loadObs)    loadObs.disconnect();
+      if (playObs)    playObs.disconnect();
+      if (releaseObs) releaseObs.disconnect();
 
+      // ① 近づいたら src をセット
       loadObs = new IntersectionObserver((entries) => {
         for (const e of entries) {
           if (!e.isIntersecting) continue;
@@ -195,18 +198,21 @@
           if (!video || video.src) continue;
 
           video.src = card._url;
-          loadObs.unobserve(card); // 一度だけセットすれば OK
+          loadObs.unobserve(card); // releaseObs が再登録するまで不要
 
           card._spin.style.display = 'flex';
+          // src を設定するたびに spinner 非表示ハンドラを登録
+          video.addEventListener('playing', () => { card._spin.style.display = 'none'; }, { once: true });
+          video.addEventListener('error',   () => { card._spin.style.display = 'none'; }, { once: true });
 
-          // 既にビューポート内なら即再生
           const r = card.getBoundingClientRect();
           if (r.top < window.innerHeight && r.bottom > 0) {
             video.play().catch(() => {});
           }
         }
-      }, { rootMargin: '150px' });
+      }, { rootMargin: '300px' });
 
+      // ② ビューポート内で再生、外で一時停止
       playObs = new IntersectionObserver((entries) => {
         for (const e of entries) {
           const video = e.target._video;
@@ -218,6 +224,22 @@
           }
         }
       }, { threshold: 0.1 });
+
+      // ③ 800px 以遠になったら src を解放してデコーダ・バッファを返却
+      releaseObs = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) continue; // まだ近い、解放しない
+          const card  = e.target;
+          const video = card._video;
+          if (!video || !video.src) continue; // 未ロードはスキップ
+
+          video.pause();
+          video.src = '';
+          video.load();                        // デコーダバッファを即時解放
+          card._spin.style.display = 'none';   // spinner をリセット
+          loadObs.observe(card);               // 再び近づいたら再読み込み
+        }
+      }, { rootMargin: '800px' });
     }
 
     // ── DOM 参照 ──────────────────────────────────────
@@ -293,8 +315,9 @@
 
     // ── グリッドリセット ──────────────────────────────
     function resetGrid() {
-      if (loadObs) loadObs.disconnect();
-      if (playObs) playObs.disconnect();
+      if (loadObs)    loadObs.disconnect();
+      if (playObs)    playObs.disconnect();
+      if (releaseObs) releaseObs.disconnect();
       if (sentinelObs) { sentinelObs.disconnect(); sentinelObs = null; }
 
       // メモリ解放：src を空にして load() を呼ぶことでブラウザがデコードバッファを解放
@@ -378,16 +401,14 @@
       spin.innerHTML = '<div class="ring"></div>';
       spin.style.display = 'none';
       card._spin = spin;
-
-      video.addEventListener('playing', () => { spin.style.display = 'none'; }, { once: true });
-      video.addEventListener('error',   () => { spin.style.display = 'none'; }, { once: true });
+      // playing/error ハンドラは loadObs 内で src セットのたびに登録
 
       card.appendChild(video);
       card.appendChild(spin);
 
-      // 共有 observer に登録（個別 observer は作らない）
       loadObs.observe(card);
       playObs.observe(card);
+      releaseObs.observe(card); // 800px 以遠で src 解放
 
       return card;
     }
