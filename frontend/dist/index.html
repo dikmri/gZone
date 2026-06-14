@@ -240,9 +240,10 @@
     const BATCH = 24;
 
     // ── パフォーマンス定数 ────────────────────────────
-    // 同時ロード上限: WebView2 のデコーダは並列数が多いほど競合しフリーズする
-    const MAX_LOADS      = 3;
-    const LOAD_MARGIN    = '300px'; // スクロールコンテナ端からこの距離でプリロード開始
+    // フリーズの根本原因は video.load() の同期実行だったので requestIdleCallback で解決済み
+    // MAX_LOADS は「同時にデコーダを初期化する数」の上限（無制限だと多数同時でフリーズする）
+    const MAX_LOADS      = 6;      // 3は遅すぎ、無制限はフリーズ → 6が現実的な落とし所
+    const LOAD_MARGIN    = '500px'; // 広めに先読み（スクロール中でも積極的にプリロード）
     const RELEASE_MARGIN = '900px'; // この距離を超えたら src を解放
 
     // ── グローバル状態 ───────────────────────────────
@@ -257,11 +258,10 @@
     let releaseObs  = null;
 
     // ── ロードキュー ──────────────────────────────────
-    // Set で O(1) 重複チェック、配列ポインタで O(1) 消費
-    let activeLoads  = 0;
-    let queueHead    = 0;
-    const queueArr   = [];
-    const queueSet   = new Set();
+    let activeLoads = 0;
+    let queueHead   = 0;
+    const queueArr  = [];
+    const queueSet  = new Set();
 
     function enqueue(card) {
       if (queueSet.has(card)) return;
@@ -271,24 +271,31 @@
     }
 
     function dequeue(card) {
-      queueSet.delete(card); // flush 時にスキップされる
+      queueSet.delete(card); // flush 時にポインタで読み飛ばされる
     }
 
     function flush() {
-      if (isScrollFast) return;
+      // ※ isScrollFast チェックなし — スクロール中も積極的にロードする
       while (queueHead < queueArr.length && activeLoads < MAX_LOADS) {
         const card = queueArr[queueHead++];
-        if (!queueSet.has(card)) continue;        // キャンセル済み
+        if (!queueSet.has(card)) continue;        // dequeue 済み
         queueSet.delete(card);
-        if (!card.isConnected || card._video.src) continue; // 接続解除 or 既ロード
+        if (!card.isConnected || card._video.src) continue;
         startLoad(card);
       }
-      // 消費済みエントリを定期的に GC
       if (queueHead > 64) { queueArr.splice(0, queueHead); queueHead = 0; }
     }
 
     function startLoad(card) {
+      // 同一カードが再キューされた場合、前回のスロットを確実に解放してから開始
+      if (card._releaseSlot) { card._releaseSlot(); }
+
       const video = card._video;
+
+      // 前回のリスナー残骸をクリア（abort/emptied フォールスポジティブ対策）
+      if (card._onCanplay) { video.removeEventListener('canplay', card._onCanplay); }
+      if (card._onError)   { video.removeEventListener('error',   card._onError);   }
+
       activeLoads++;
 
       let done = false;
@@ -296,22 +303,29 @@
         clearTimeout(timer);
         if (done) return;
         done = true;
+        card._releaseSlot = null;
         activeLoads = Math.max(0, activeLoads - 1);
         flush();
       };
-      // 15秒タイムアウト: canplay/error が来なくてもスロットを返す
-      const timer = setTimeout(releaseSlot, 15000);
+      card._releaseSlot = releaseSlot;
+      // 8秒で強制タイムアウト（stall 時にスロットが永久に塞がらないようにする）
+      const timer = setTimeout(releaseSlot, 8000);
 
-      video.addEventListener('canplay', () => {
+      card._onCanplay = () => {
+        card._onCanplay = card._onError = null;
         card._spin.style.display = 'none';
         releaseSlot();
-        // ロード完了時点でビューポート内なら再生
         if (card._inVP && card.isConnected) video.play().catch(() => {});
-      }, { once: true });
-      video.addEventListener('error',   () => { card._spin.style.display = 'none'; releaseSlot(); }, { once: true });
-      // ロード中に src が除去されると abort/emptied が発火 → スロットを返す
-      video.addEventListener('abort',   releaseSlot, { once: true });
-      video.addEventListener('emptied', releaseSlot, { once: true });
+      };
+      card._onError = () => {
+        card._onCanplay = card._onError = null;
+        card._spin.style.display = 'none';
+        releaseSlot();
+      };
+      // abort/emptied は WebView2 でフォールスポジティブが多いため使用しない
+      // スロット解放は canplay / error / timeout / 明示的 releaseSlot() のみ
+      video.addEventListener('canplay', card._onCanplay, { once: true });
+      video.addEventListener('error',   card._onError,   { once: true });
 
       card._spin.style.display = 'flex';
       video.src = card._url;
@@ -322,37 +336,20 @@
       const video = card._video;
       if (!video.src) return;
 
+      // ロード中ならスロットを明示的に解放し、リスナーも除去
+      if (card._releaseSlot) { card._releaseSlot(); }
+      if (card._onCanplay) { video.removeEventListener('canplay', card._onCanplay); card._onCanplay = null; }
+      if (card._onError)   { video.removeEventListener('error',   card._onError);   card._onError   = null; }
+
       card._inVP = false;
       video.pause();
       video.removeAttribute('src'); // src='' はベースURLに解決されるため removeAttribute を使う
       card._spin.style.display = 'none';
-      if (loadObs) loadObs.observe(card); // 再び近づいたら再キュー
+      if (loadObs) loadObs.observe(card);
 
-      // video.load() はデコーダを解放するが重い処理 → アイドル時間に先送り
+      // video.load() でデコーダ解放 → メインスレッドブロックを防ぐため idle 時に先送り
       const ric = typeof requestIdleCallback !== 'undefined' ? requestIdleCallback : (fn) => setTimeout(fn, 0);
       ric(() => { if (!video.src) video.load(); }, { timeout: 2000 });
-    }
-
-    // ── スクロール速度検知 ───────────────────────────
-    let isScrollFast  = false;
-    let scrollTimer   = null;
-    let lastScrollTop = 0;
-    let lastScrollMs  = Date.now();
-
-    function onScroll() {
-      const now = Date.now();
-      const dt  = now - lastScrollMs;
-      const dy  = Math.abs(grid.scrollTop - lastScrollTop);
-      // 2px/ms (= 2000px/s) 超を高速スクロールと判定
-      isScrollFast  = dt > 0 && (dy / dt) > 2;
-      lastScrollTop = grid.scrollTop;
-      lastScrollMs  = now;
-
-      clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(() => {
-        isScrollFast = false;
-        flush(); // 停止後にキューを再開
-      }, 150);
     }
 
     // ── Observer 初期化 ─────────────────────────────
@@ -361,7 +358,7 @@
       if (playObs)    playObs.disconnect();
       if (releaseObs) releaseObs.disconnect();
 
-      // ① スクロールコンテナ端から LOAD_MARGIN 以内 → ロードキューに積む
+      // ① LOAD_MARGIN 以内 → キューに積む（スクロール中でも止めない）
       loadObs = new IntersectionObserver((entries) => {
         for (const e of entries) {
           if (!e.isIntersecting) continue;
@@ -372,7 +369,7 @@
         }
       }, { root: grid, rootMargin: LOAD_MARGIN });
 
-      // ② ビューポート内 → rAF で再生 / 外 → 即時一時停止
+      // ② ビューポート内 → rAF 経由で再生 / 外 → 即時一時停止
       playObs = new IntersectionObserver((entries) => {
         for (const e of entries) {
           const card  = e.target;
@@ -381,7 +378,6 @@
           card._inVP = e.isIntersecting;
           if (e.isIntersecting) {
             if (video.src) {
-              // play() は rAF 内で呼び、スクロール処理と分離してジャンクを防ぐ
               requestAnimationFrame(() => {
                 if (video.src && card.isConnected) video.play().catch(() => {});
               });
@@ -410,9 +406,6 @@
     const sizeValEl    = document.getElementById('size-val');
     const folderNameEl = document.getElementById('folder-name');
     const totalCountEl = document.getElementById('total-count');
-
-    // passive: スクロールイベントでメインスレッドをブロックしない
-    grid.addEventListener('scroll', onScroll, { passive: true });
 
     // ── サイズスライダー ──────────────────────────────
     sizeRange.addEventListener('input', () => {
