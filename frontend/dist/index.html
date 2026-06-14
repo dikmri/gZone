@@ -123,6 +123,8 @@
       padding-bottom: 56.25%; /* 16:9 デフォルト。loadedmetadata で実比率に更新 */
       background: #181818;
       overflow: hidden;
+      /* CSS 包含: カード内のレイアウト/スタイル変化が外に伝搬しないようにし描画コストを削減 */
+      contain: layout style;
     }
     .card:hover {
       outline: 1.5px solid rgba(58,142,255,0.35);
@@ -237,77 +239,169 @@
 
     const BATCH = 24;
 
+    // ── パフォーマンス定数 ────────────────────────────
+    // 同時ロード上限: WebView2 のデコーダは並列数が多いほど競合しフリーズする
+    const MAX_LOADS      = 3;
+    const LOAD_MARGIN    = '300px'; // スクロールコンテナ端からこの距離でプリロード開始
+    const RELEASE_MARGIN = '900px'; // この距離を超えたら src を解放
+
+    // ── グローバル状態 ───────────────────────────────
     let folderPath  = '';
     let videoPort   = 0;
     let totalCount  = 0;
     let offset      = 0;
     let isLoading   = false;
     let sentinelObs = null;
+    let loadObs     = null;
+    let playObs     = null;
+    let releaseObs  = null;
 
-    // ── 共有 IntersectionObserver（3つで全カードを管理） ──
-    let loadObs    = null; // src をセット（ビューポート手前 300px）
-    let playObs    = null; // 再生 / 一時停止（ビューポート内）
-    let releaseObs = null; // 800px 以遠で src を解放 → メモリ返却
+    // ── ロードキュー ──────────────────────────────────
+    // Set で O(1) 重複チェック、配列ポインタで O(1) 消費
+    let activeLoads  = 0;
+    let queueHead    = 0;
+    const queueArr   = [];
+    const queueSet   = new Set();
 
+    function enqueue(card) {
+      if (queueSet.has(card)) return;
+      queueSet.add(card);
+      queueArr.push(card);
+      flush();
+    }
+
+    function dequeue(card) {
+      queueSet.delete(card); // flush 時にスキップされる
+    }
+
+    function flush() {
+      if (isScrollFast) return;
+      while (queueHead < queueArr.length && activeLoads < MAX_LOADS) {
+        const card = queueArr[queueHead++];
+        if (!queueSet.has(card)) continue;        // キャンセル済み
+        queueSet.delete(card);
+        if (!card.isConnected || card._video.src) continue; // 接続解除 or 既ロード
+        startLoad(card);
+      }
+      // 消費済みエントリを定期的に GC
+      if (queueHead > 64) { queueArr.splice(0, queueHead); queueHead = 0; }
+    }
+
+    function startLoad(card) {
+      const video = card._video;
+      activeLoads++;
+
+      let done = false;
+      const releaseSlot = () => {
+        clearTimeout(timer);
+        if (done) return;
+        done = true;
+        activeLoads = Math.max(0, activeLoads - 1);
+        flush();
+      };
+      // 15秒タイムアウト: canplay/error が来なくてもスロットを返す
+      const timer = setTimeout(releaseSlot, 15000);
+
+      video.addEventListener('canplay', () => {
+        card._spin.style.display = 'none';
+        releaseSlot();
+        // ロード完了時点でビューポート内なら再生
+        if (card._inVP && card.isConnected) video.play().catch(() => {});
+      }, { once: true });
+      video.addEventListener('error',   () => { card._spin.style.display = 'none'; releaseSlot(); }, { once: true });
+      // ロード中に src が除去されると abort/emptied が発火 → スロットを返す
+      video.addEventListener('abort',   releaseSlot, { once: true });
+      video.addEventListener('emptied', releaseSlot, { once: true });
+
+      card._spin.style.display = 'flex';
+      video.src = card._url;
+    }
+
+    function releaseCard(card) {
+      dequeue(card);
+      const video = card._video;
+      if (!video.src) return;
+
+      card._inVP = false;
+      video.pause();
+      video.removeAttribute('src'); // src='' はベースURLに解決されるため removeAttribute を使う
+      card._spin.style.display = 'none';
+      if (loadObs) loadObs.observe(card); // 再び近づいたら再キュー
+
+      // video.load() はデコーダを解放するが重い処理 → アイドル時間に先送り
+      const ric = typeof requestIdleCallback !== 'undefined' ? requestIdleCallback : (fn) => setTimeout(fn, 0);
+      ric(() => { if (!video.src) video.load(); }, { timeout: 2000 });
+    }
+
+    // ── スクロール速度検知 ───────────────────────────
+    let isScrollFast  = false;
+    let scrollTimer   = null;
+    let lastScrollTop = 0;
+    let lastScrollMs  = Date.now();
+
+    function onScroll() {
+      const now = Date.now();
+      const dt  = now - lastScrollMs;
+      const dy  = Math.abs(grid.scrollTop - lastScrollTop);
+      // 2px/ms (= 2000px/s) 超を高速スクロールと判定
+      isScrollFast  = dt > 0 && (dy / dt) > 2;
+      lastScrollTop = grid.scrollTop;
+      lastScrollMs  = now;
+
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => {
+        isScrollFast = false;
+        flush(); // 停止後にキューを再開
+      }, 150);
+    }
+
+    // ── Observer 初期化 ─────────────────────────────
     function initObservers() {
       if (loadObs)    loadObs.disconnect();
       if (playObs)    playObs.disconnect();
       if (releaseObs) releaseObs.disconnect();
 
-      // ① 近づいたら src をセット
+      // ① スクロールコンテナ端から LOAD_MARGIN 以内 → ロードキューに積む
       loadObs = new IntersectionObserver((entries) => {
         for (const e of entries) {
           if (!e.isIntersecting) continue;
-          const card  = e.target;
-          const video = card._video;
-          if (!video || video.src) continue;
-
-          video.src = card._url;
-          loadObs.unobserve(card); // releaseObs が再登録するまで不要
-
-          card._spin.style.display = 'flex';
-          // src を設定するたびに spinner 非表示ハンドラを登録
-          video.addEventListener('playing', () => { card._spin.style.display = 'none'; }, { once: true });
-          video.addEventListener('error',   () => { card._spin.style.display = 'none'; }, { once: true });
-
-          const r = card.getBoundingClientRect();
-          if (r.top < window.innerHeight && r.bottom > 0) {
-            video.play().catch(() => {});
-          }
+          const card = e.target;
+          if (card._video.src) continue;
+          loadObs.unobserve(card);
+          enqueue(card);
         }
-      }, { rootMargin: '300px' });
+      }, { root: grid, rootMargin: LOAD_MARGIN });
 
-      // ② ビューポート内で再生、外で一時停止
+      // ② ビューポート内 → rAF で再生 / 外 → 即時一時停止
       playObs = new IntersectionObserver((entries) => {
         for (const e of entries) {
-          const video = e.target._video;
+          const card  = e.target;
+          const video = card._video;
           if (!video) continue;
+          card._inVP = e.isIntersecting;
           if (e.isIntersecting) {
-            if (video.src) video.play().catch(() => {});
+            if (video.src) {
+              // play() は rAF 内で呼び、スクロール処理と分離してジャンクを防ぐ
+              requestAnimationFrame(() => {
+                if (video.src && card.isConnected) video.play().catch(() => {});
+              });
+            }
           } else {
             video.pause();
           }
         }
-      }, { threshold: 0.1 });
+      }, { root: grid, threshold: 0.1 });
 
-      // ③ 800px 以遠になったら src を解放してデコーダ・バッファを返却
+      // ③ RELEASE_MARGIN を超えたら src 解放
       releaseObs = new IntersectionObserver((entries) => {
         for (const e of entries) {
-          if (e.isIntersecting) continue; // まだ近い、解放しない
-          const card  = e.target;
-          const video = card._video;
-          if (!video || !video.src) continue; // 未ロードはスキップ
-
-          video.pause();
-          video.removeAttribute('src'); // src='' はベースURLに解決され truthy になるため removeAttribute を使う
-          video.load();                        // デコーダバッファを即時解放
-          card._spin.style.display = 'none';   // spinner をリセット
-          loadObs.observe(card);               // 再び近づいたら再読み込み
+          if (e.isIntersecting) continue;
+          releaseCard(e.target);
         }
-      }, { rootMargin: '800px' });
+      }, { root: grid, rootMargin: RELEASE_MARGIN });
     }
 
-    // ── DOM 参照 ──────────────────────────────────────
+    // ── DOM 参照 ─────────────────────────────────────
     const grid         = document.getElementById('grid');
     const emptyEl      = document.getElementById('empty');
     const openBtn      = document.getElementById('open-btn');
@@ -316,6 +410,9 @@
     const sizeValEl    = document.getElementById('size-val');
     const folderNameEl = document.getElementById('folder-name');
     const totalCountEl = document.getElementById('total-count');
+
+    // passive: スクロールイベントでメインスレッドをブロックしない
+    grid.addEventListener('scroll', onScroll, { passive: true });
 
     // ── サイズスライダー ──────────────────────────────
     sizeRange.addEventListener('input', () => {
@@ -366,7 +463,7 @@
         if (sentinelObs) sentinelObs.disconnect();
         sentinelObs = new IntersectionObserver(([e]) => {
           if (e.isIntersecting) loadMore();
-        }, { rootMargin: '400px' });
+        }, { root: grid, rootMargin: '400px' });
         sentinelObs.observe(sentinel);
 
         await loadMore();
@@ -385,7 +482,12 @@
       if (releaseObs) releaseObs.disconnect();
       if (sentinelObs) { sentinelObs.disconnect(); sentinelObs = null; }
 
-      // メモリ解放：src 属性を削除して load() を呼ぶことでブラウザがデコードバッファを解放
+      // キューをクリア
+      queueArr.length = 0;
+      queueSet.clear();
+      queueHead   = 0;
+      activeLoads = 0;
+
       grid.querySelectorAll('video').forEach(v => {
         v.pause();
         v.removeAttribute('src');
@@ -423,9 +525,7 @@
           offset += names.length;
         }
 
-        if (sentinel && offset >= totalCount) {
-          sentinel.style.display = 'none';
-        }
+        if (sentinel && offset >= totalCount) sentinel.style.display = 'none';
       } catch (err) {
         console.error('loadMore:', err);
         loadingRow.remove();
@@ -437,34 +537,32 @@
     // ── カード生成 ────────────────────────────────────
     function createCard(name, url) {
       const card = document.createElement('div');
-      card.className = 'card';
-      card.title = name;
-      card._url  = url;
-      card._name = name;
+      card.className  = 'card';
+      card.title      = name;
+      card._url       = url;
+      card._name      = name;
+      card._inVP      = false; // ビューポート内フラグ（getBoundingClientRect 不要にする）
+      card._dragging  = false;
 
       const video = document.createElement('video');
-      video.muted      = true;
-      video.loop       = true;
+      video.muted       = true;
+      video.loop        = true;
       video.playsInline = true;
-      video.preload    = 'none';
+      video.preload     = 'none';
       card._video = video;
 
-      // video 自体がブラウザのデフォルトドラッグ（URL ドラッグ）を発生させないようにする
       video.addEventListener('dragstart', (e) => e.preventDefault());
 
-      // マウスオーバーで音声オン/オフ（ドラッグ中は変えない）
       card.addEventListener('mouseenter', () => { if (!card._dragging) video.muted = false; });
       card.addEventListener('mouseleave', () => { video.muted = true; });
 
-      // ── ドラッグ ─────────────────────────────────
+      // ドラッグ
       card.draggable = true;
       card.addEventListener('dragstart', (e) => {
         card._dragging = true;
         card.classList.add('dragging');
         video.muted = true;
-
-        // file:// URI を組み立てる（Windows のバックスラッシュをスラッシュに変換）
-        const slash = folderPath.replace(/\\/g, '/');
+        const slash   = folderPath.replace(/\\/g, '/');
         const fileUri = 'file:///' + slash + '/' + name.replace(/ /g, '%20');
         e.dataTransfer.effectAllowed = 'copy';
         e.dataTransfer.setData('text/plain',    folderPath + '\\' + name);
@@ -476,18 +574,18 @@
         card.classList.remove('dragging');
       });
 
-      // ── 右クリック ───────────────────────────────
+      // 右クリック
       card.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         e.stopPropagation();
         showCtxMenu(e.clientX, e.clientY, card);
       });
 
-      // 実際の縦横比が判明したら padding-bottom を更新（これで一切のクリップがなくなる）
+      // アスペクト比更新: rAF でレイアウト変更をフレーム境界にまとめる（強制 reflow 回避）
       video.addEventListener('loadedmetadata', () => {
         if (video.videoWidth && video.videoHeight) {
-          card.style.paddingBottom =
-            (video.videoHeight / video.videoWidth * 100).toFixed(4) + '%';
+          const pb = (video.videoHeight / video.videoWidth * 100).toFixed(4) + '%';
+          requestAnimationFrame(() => { if (card.isConnected) card.style.paddingBottom = pb; });
         }
       }, { once: true });
 
@@ -497,14 +595,13 @@
       spin.innerHTML = '<div class="ring"></div>';
       spin.style.display = 'none';
       card._spin = spin;
-      // playing/error ハンドラは loadObs 内で src セットのたびに登録
 
       card.appendChild(video);
       card.appendChild(spin);
 
       loadObs.observe(card);
       playObs.observe(card);
-      releaseObs.observe(card); // 800px 以遠で src 解放
+      releaseObs.observe(card);
 
       return card;
     }
@@ -514,14 +611,13 @@
 
     // ── コンテキストメニュー ──────────────────────────
     const ctxMenu = document.getElementById('ctx-menu');
-    let ctxCard   = null; // 右クリックされたカード
+    let ctxCard   = null;
 
     function showCtxMenu(x, y, card) {
       ctxCard = card;
       ctxMenu.style.left = x + 'px';
       ctxMenu.style.top  = y + 'px';
       ctxMenu.classList.add('show');
-      // 画面端をはみ出す場合は反対側に出す
       const r = ctxMenu.getBoundingClientRect();
       if (r.right  > window.innerWidth)  ctxMenu.style.left = (x - r.width)  + 'px';
       if (r.bottom > window.innerHeight) ctxMenu.style.top  = (y - r.height) + 'px';
@@ -532,19 +628,16 @@
       ctxCard = null;
     }
 
-    // メニュー外クリックで閉じる
     document.addEventListener('click',       (e) => { if (!ctxMenu.contains(e.target)) hideCtxMenu(); });
     document.addEventListener('contextmenu', (e) => { if (!e.target.closest('.card'))  hideCtxMenu(); });
     document.addEventListener('keydown',     (e) => { if (e.key === 'Escape') hideCtxMenu(); });
 
-    // エクスプローラーで表示
     document.getElementById('ctx-reveal').addEventListener('click', () => {
       if (!ctxCard) return;
       window.go.main.App.RevealInExplorer(ctxCard._name).catch(() => {});
       hideCtxMenu();
     });
 
-    // パスをコピー
     document.getElementById('ctx-copy-path').addEventListener('click', () => {
       if (!ctxCard) return;
       const full = folderPath + (folderPath.endsWith('\\') ? '' : '\\') + ctxCard._name;
@@ -552,25 +645,20 @@
       hideCtxMenu();
     });
 
-    // 削除
     document.getElementById('ctx-delete').addEventListener('click', async () => {
       if (!ctxCard) return;
       const card = ctxCard;
       hideCtxMenu();
-
       if (!confirm(`「${card._name}」を削除しますか？\n\nこの操作は元に戻せません（ゴミ箱には入りません）。`)) return;
-
       try {
         await window.go.main.App.DeleteFile(card._name);
-
-        // Observer から外してビデオを解放してから DOM から削除
         if (loadObs)    loadObs.unobserve(card);
         if (playObs)    playObs.unobserve(card);
         if (releaseObs) releaseObs.unobserve(card);
+        dequeue(card);
         const v = card._video;
         if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
         card.remove();
-
         totalCount = Math.max(0, totalCount - 1);
         offset     = Math.max(0, offset     - 1);
         totalCountEl.textContent = totalCount > 0 ? totalCount + ' 本' : '';
@@ -586,39 +674,24 @@
     const updateBar     = document.getElementById('update-bar');
     const updateVersion = document.getElementById('update-version');
 
-    function hideUpdateScreen() {
-      updateScreen.classList.add('hidden');
-    }
+    function hideUpdateScreen() { updateScreen.classList.add('hidden'); }
 
-    // Wails runtime と go bindings が利用可能になるまで待機してからチェック開始
     function initUpdateCheck() {
       if (!window.runtime || !window.go?.main?.App) {
         setTimeout(initUpdateCheck, 30);
         return;
       }
-
-      window.runtime.EventsOn('update:none', () => {
-        hideUpdateScreen();
-      });
-
+      window.runtime.EventsOn('update:none',      ()        => { hideUpdateScreen(); });
       window.runtime.EventsOn('update:available', (version) => {
         updateMsg.textContent = version + ' をダウンロード中...';
         updateBarWrap.classList.add('visible');
       });
-
-      window.runtime.EventsOn('update:progress', (pct) => {
-        updateBar.style.width = pct + '%';
-      });
-
-      window.runtime.EventsOn('update:done', (version) => {
+      window.runtime.EventsOn('update:progress',  (pct)     => { updateBar.style.width = pct + '%'; });
+      window.runtime.EventsOn('update:done',      ()        => {
         updateBar.style.width = '100%';
         updateMsg.textContent = 'アップデート完了！再起動中...';
       });
-
-      window.runtime.EventsOn('update:error', () => {
-        // エラー時は通常起動（update:none も続けて emit される）
-      });
-
+      window.runtime.EventsOn('update:error', () => {});
       window.go.main.App.StartUpdateCheck();
     }
 
