@@ -24,11 +24,6 @@ jobs:
             asset: gZone_windows_amd64.exe
             binary: build/bin/gZone.exe
 
-          - os: macos-13
-            platform: darwin/amd64
-            asset: gZone_darwin_amd64
-            binary: build/bin/gZone.app/Contents/MacOS/gZone
-
           - os: macos-latest
             platform: darwin/arm64
             asset: gZone_darwin_arm64
@@ -138,7 +133,6 @@ jobs:
             |---|---|
             | Windows (x64) | `gZone_windows_amd64.exe` |
             | macOS (Apple Silicon) | `gZone_darwin_arm64.app.tar.gz` |
-            | macOS (Intel) | `gZone_darwin_amd64.app.tar.gz` |
             | Linux (x64) | `gZone_linux_amd64` |
 
             ---

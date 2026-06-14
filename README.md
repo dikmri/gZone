@@ -38,7 +38,6 @@ curl -fsSL https://raw.githubusercontent.com/dikmri/gZone/main/scripts/install.s
 |---|---|
 | Windows (x64) | `gZone_windows_amd64.exe` |
 | macOS (Apple Silicon) | `gZone_darwin_arm64.app.tar.gz` |
-| macOS (Intel) | `gZone_darwin_amd64.app.tar.gz` |
 | Linux (x64) | `gZone_linux_amd64` |
 
 ## 使い方
