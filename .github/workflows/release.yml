@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             platform: linux/amd64
             asset: gZone_linux_amd64
             binary: build/bin/gZone
@@ -50,15 +50,15 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
       - name: Linux 依存パッケージ
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev nsis
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
 
       - name: ビルド (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: wails build -platform ${{ matrix.platform }} -tags native_webview2loader -ldflags "-X main.Version=${{ github.ref_name }}"
+        run: wails build -platform ${{ matrix.platform }} -ldflags "-X main.Version=${{ github.ref_name }}"
 
       - name: ビルド (Linux / macOS)
         if: matrix.os != 'windows-latest'
@@ -67,7 +67,7 @@ jobs:
       # ── アーティファクト準備 ──────────────────────────
 
       - name: アーティファクト準備 (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         run: cp "${{ matrix.binary }}" "${{ matrix.asset }}"
 
       - name: アーティファクト準備 (Windows)
