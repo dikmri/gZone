@@ -234,7 +234,7 @@
           if (!video || !video.src) continue; // 未ロードはスキップ
 
           video.pause();
-          video.src = '';
+          video.removeAttribute('src'); // src='' はベースURLに解決され truthy になるため removeAttribute を使う
           video.load();                        // デコーダバッファを即時解放
           card._spin.style.display = 'none';   // spinner をリセット
           loadObs.observe(card);               // 再び近づいたら再読み込み
@@ -320,10 +320,10 @@
       if (releaseObs) releaseObs.disconnect();
       if (sentinelObs) { sentinelObs.disconnect(); sentinelObs = null; }
 
-      // メモリ解放：src を空にして load() を呼ぶことでブラウザがデコードバッファを解放
+      // メモリ解放：src 属性を削除して load() を呼ぶことでブラウザがデコードバッファを解放
       grid.querySelectorAll('video').forEach(v => {
         v.pause();
-        v.src = '';
+        v.removeAttribute('src');
         v.load();
       });
 
