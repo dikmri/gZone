@@ -22,6 +22,29 @@
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #555; }
 
+    /* ─── アップデート画面 ───────────────────────────── */
+    #update-screen {
+      position: fixed; inset: 0; z-index: 9999;
+      background: #111;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #update-screen.hidden { display: none; }
+    .update-box {
+      display: flex; flex-direction: column; align-items: center; gap: 18px;
+      padding: 40px 60px;
+      background: #181818; border: 1px solid #252525; border-radius: 12px;
+      min-width: 320px;
+    }
+    .update-logo { font-size: 28px; font-weight: 800; letter-spacing: 0.06em; color: #fff; }
+    #update-msg  { font-size: 13px; color: #aaa; }
+    .update-bar-wrap {
+      width: 100%; height: 3px; background: #252525; border-radius: 2px; overflow: hidden;
+      display: none;
+    }
+    .update-bar-wrap.visible { display: block; }
+    #update-bar { height: 100%; width: 0%; background: #3a8eff; border-radius: 2px; transition: width 0.2s; }
+    #update-version { font-size: 11px; color: #555; }
+
     #root { display: flex; flex-direction: column; height: 100vh; }
 
     /* ─── Header ─────────────────────────────────── */
@@ -139,6 +162,18 @@
   </style>
 </head>
 <body>
+  <!-- アップデート確認中はこの画面が表示される -->
+  <div id="update-screen">
+    <div class="update-box">
+      <div class="update-logo">gZone</div>
+      <div id="update-msg">アップデートを確認中...</div>
+      <div class="update-bar-wrap" id="update-bar-wrap">
+        <div id="update-bar"></div>
+      </div>
+      <div id="update-version"></div>
+    </div>
+  </div>
+
   <div id="root">
     <header>
       <div class="h-left">
@@ -415,6 +450,51 @@
 
     openBtn .addEventListener('click', openFolder);
     emptyBtn.addEventListener('click', openFolder);
+
+    // ── アップデート処理 ──────────────────────────────
+    const updateScreen  = document.getElementById('update-screen');
+    const updateMsg     = document.getElementById('update-msg');
+    const updateBarWrap = document.getElementById('update-bar-wrap');
+    const updateBar     = document.getElementById('update-bar');
+    const updateVersion = document.getElementById('update-version');
+
+    function hideUpdateScreen() {
+      updateScreen.classList.add('hidden');
+    }
+
+    // Wails runtime と go bindings が利用可能になるまで待機してからチェック開始
+    function initUpdateCheck() {
+      if (!window.runtime || !window.go?.main?.App) {
+        setTimeout(initUpdateCheck, 30);
+        return;
+      }
+
+      window.runtime.EventsOn('update:none', () => {
+        hideUpdateScreen();
+      });
+
+      window.runtime.EventsOn('update:available', (version) => {
+        updateMsg.textContent = version + ' をダウンロード中...';
+        updateBarWrap.classList.add('visible');
+      });
+
+      window.runtime.EventsOn('update:progress', (pct) => {
+        updateBar.style.width = pct + '%';
+      });
+
+      window.runtime.EventsOn('update:done', (version) => {
+        updateBar.style.width = '100%';
+        updateMsg.textContent = 'アップデート完了！再起動中...';
+      });
+
+      window.runtime.EventsOn('update:error', () => {
+        // エラー時は通常起動（update:none も続けて emit される）
+      });
+
+      window.go.main.App.StartUpdateCheck();
+    }
+
+    initUpdateCheck();
   </script>
 </body>
 </html>

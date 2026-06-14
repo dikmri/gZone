@@ -6,12 +6,20 @@ export function GetTotalVideoCount(arg1) {
   return window['go']['main']['App']['GetTotalVideoCount'](arg1);
 }
 
+export function GetVersion() {
+  return window['go']['main']['App']['GetVersion']();
+}
+
 export function GetVideoFiles(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetVideoFiles'](arg1, arg2, arg3);
 }
 
 export function SelectFolder() {
   return window['go']['main']['App']['SelectFolder']();
+}
+
+export function StartUpdateCheck() {
+  return window['go']['main']['App']['StartUpdateCheck']();
 }
 
 export function StartVideoServer(arg1) {
