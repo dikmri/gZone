@@ -1,0 +1,4 @@
+build/
+frontend/node_modules/
+go.sum
+*.exe

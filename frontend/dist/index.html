@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>gZone</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%; overflow: hidden;
+      background: #111;
+      color: #eee;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+    #root { display: flex; flex-direction: column; height: 100vh; }
+
+    /* ─── Header ─────────────────────────────────── */
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 0 14px; height: 44px;
+      background: #181818;
+      border-bottom: 1px solid #252525;
+      flex-shrink: 0;
+    }
+    .h-left  { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .h-center { flex: 1; min-width: 0; text-align: center; }
+    .h-right  { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+    .title { font-size: 17px; font-weight: 700; letter-spacing: 0.05em; color: #fff; }
+    #total-count { font-size: 11px; color: #555; }
+    #folder-name {
+      font-size: 12px; color: #666;
+      display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    .size-ctrl { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; }
+    #size-range { width: 90px; cursor: pointer; accent-color: #3a8eff; }
+    #size-val   { min-width: 24px; text-align: right; font-size: 11px; color: #888; }
+
+    #open-btn {
+      padding: 5px 14px;
+      background: #1a4080; border: 1px solid #2a5ab0; border-radius: 5px;
+      color: #a8cfff; cursor: pointer; font-size: 12px; font-weight: 600;
+      white-space: nowrap; transition: background 0.12s;
+    }
+    #open-btn:hover:not(:disabled) { background: #1e4e9a; color: #c8e0ff; }
+    #open-btn:disabled { opacity: 0.4; cursor: default; }
+
+    /* ─── Main ───────────────────────────────────── */
+    main { flex: 1; overflow: hidden; }
+
+    #empty {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; height: 100%; gap: 20px;
+    }
+    #empty p { font-size: 15px; color: #888; }
+    #empty-btn {
+      padding: 12px 32px;
+      background: #1a4080; border: 1px solid #2a5ab0; border-radius: 8px;
+      color: #a8cfff; cursor: pointer; font-size: 15px; font-weight: 600;
+      transition: background 0.12s;
+    }
+    #empty-btn:hover:not(:disabled) { background: #1e4e9a; color: #c8e0ff; }
+    #empty-btn:disabled { opacity: 0.4; cursor: default; }
+
+    /* ─── Grid ───────────────────────────────────── */
+    #grid {
+      --cs: 280px;
+      display: none;
+      height: 100%;
+      overflow-y: auto;
+      grid-template-columns: repeat(auto-fill, minmax(var(--cs), 1fr));
+      gap: 2px;
+      padding: 2px;
+      align-content: start;
+      /* カードがお互いの高さに引き伸ばされないようにする */
+      align-items: start;
+    }
+
+    /* ─── Card ───────────────────────────────────── */
+    .card {
+      /*
+       * padding-bottom % は常に「横幅」に対する割合。
+       * height:0 + padding-bottom:XX% で「横幅×XX%」の高さを作る古典的手法。
+       * border-box だと padding が height:0 に押し潰されるので content-box を使う。
+       */
+      box-sizing: content-box;
+      position: relative;
+      height: 0;
+      padding-bottom: 56.25%; /* 16:9 デフォルト。loadedmetadata で実比率に更新 */
+      background: #181818;
+      overflow: hidden;
+    }
+    .card:hover {
+      outline: 1.5px solid rgba(58,142,255,0.35);
+      outline-offset: -1.5px;
+    }
+    .card video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover; /* 比率一致後はクリップなし。不一致の一瞬だけ cover */
+      display: block;
+    }
+
+    /* ─── スピナー ───────────────────────────────── */
+    .card-spin {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+    }
+    .ring {
+      width: 24px; height: 24px;
+      border: 2.5px solid rgba(255,255,255,0.08);
+      border-top-color: rgba(58,142,255,0.75);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    .loading-row {
+      grid-column: 1 / -1;
+      display: flex; align-items: center; justify-content: center; height: 48px;
+    }
+    .loading-row .ring { width: 28px; height: 28px; border-width: 3px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── Sentinel ───────────────────────────────── */
+    #sentinel { grid-column: 1 / -1; height: 1px; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <header>
+      <div class="h-left">
+        <span class="title">gZone</span>
+        <span id="total-count"></span>
+      </div>
+      <div class="h-center">
+        <span id="folder-name"></span>
+      </div>
+      <div class="h-right">
+        <label class="size-ctrl">
+          <span>サイズ</span>
+          <input id="size-range" type="range" min="100" max="600" step="10" value="280" />
+          <span id="size-val">280</span>
+        </label>
+        <button id="open-btn">フォルダを開く</button>
+      </div>
+    </header>
+
+    <main>
+      <div id="empty">
+        <p>フォルダを選択して動画を表示します</p>
+        <button id="empty-btn">フォルダを開く</button>
+      </div>
+      <div id="grid"></div>
+    </main>
+  </div>
+
+  <script>
+    'use strict';
+
+    const BATCH = 24;
+
+    let folderPath  = '';
+    let videoPort   = 0;
+    let totalCount  = 0;
+    let offset      = 0;
+    let isLoading   = false;
+    let sentinelObs = null;
+
+    // ── 共有 IntersectionObserver（全カードで2つだけ） ──
+    let loadObs = null; // src をセットする（ビューポート手前）
+    let playObs = null; // 再生 / 一時停止（ビューポート内）
+
+    function initObservers() {
+      if (loadObs) loadObs.disconnect();
+      if (playObs) playObs.disconnect();
+
+      loadObs = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          const card  = e.target;
+          const video = card._video;
+          if (!video || video.src) continue;
+
+          video.src = card._url;
+          loadObs.unobserve(card); // 一度だけセットすれば OK
+
+          card._spin.style.display = 'flex';
+
+          // 既にビューポート内なら即再生
+          const r = card.getBoundingClientRect();
+          if (r.top < window.innerHeight && r.bottom > 0) {
+            video.play().catch(() => {});
+          }
+        }
+      }, { rootMargin: '150px' });
+
+      playObs = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          const video = e.target._video;
+          if (!video) continue;
+          if (e.isIntersecting) {
+            if (video.src) video.play().catch(() => {});
+          } else {
+            video.pause();
+          }
+        }
+      }, { threshold: 0.1 });
+    }
+
+    // ── DOM 参照 ──────────────────────────────────────
+    const grid         = document.getElementById('grid');
+    const emptyEl      = document.getElementById('empty');
+    const openBtn      = document.getElementById('open-btn');
+    const emptyBtn     = document.getElementById('empty-btn');
+    const sizeRange    = document.getElementById('size-range');
+    const sizeValEl    = document.getElementById('size-val');
+    const folderNameEl = document.getElementById('folder-name');
+    const totalCountEl = document.getElementById('total-count');
+
+    // ── サイズスライダー ──────────────────────────────
+    sizeRange.addEventListener('input', () => {
+      const v = sizeRange.value;
+      sizeValEl.textContent = v;
+      grid.style.setProperty('--cs', v + 'px');
+    });
+
+    // ── フォルダを開く ────────────────────────────────
+    async function openFolder() {
+      openBtn.disabled = true;
+      emptyBtn.disabled = true;
+      try {
+        const path = await window.go.main.App.SelectFolder();
+        if (!path) return;
+
+        const [port, count] = await Promise.all([
+          window.go.main.App.StartVideoServer(path),
+          window.go.main.App.GetTotalVideoCount(path),
+        ]);
+
+        folderPath = path;
+        videoPort  = port;
+        totalCount = count;
+        offset     = 0;
+
+        const name = path.replace(/\\/g, '/').split('/').filter(Boolean).pop() || path;
+        folderNameEl.textContent = name;
+        totalCountEl.textContent = count > 0 ? count + ' 本' : '';
+
+        resetGrid();
+        initObservers();
+
+        if (count === 0) {
+          emptyEl.querySelector('p').textContent = '動画ファイルが見つかりません';
+          emptyEl.style.display = 'flex';
+          grid.style.display    = 'none';
+          return;
+        }
+
+        emptyEl.style.display = 'none';
+        grid.style.display    = 'grid';
+
+        const sentinel = document.createElement('div');
+        sentinel.id = 'sentinel';
+        grid.appendChild(sentinel);
+
+        if (sentinelObs) sentinelObs.disconnect();
+        sentinelObs = new IntersectionObserver(([e]) => {
+          if (e.isIntersecting) loadMore();
+        }, { rootMargin: '400px' });
+        sentinelObs.observe(sentinel);
+
+        await loadMore();
+      } catch (err) {
+        console.error('openFolder:', err);
+      } finally {
+        openBtn.disabled = false;
+        emptyBtn.disabled = false;
+      }
+    }
+
+    // ── グリッドリセット ──────────────────────────────
+    function resetGrid() {
+      if (loadObs) loadObs.disconnect();
+      if (playObs) playObs.disconnect();
+      if (sentinelObs) { sentinelObs.disconnect(); sentinelObs = null; }
+
+      // メモリ解放：src を空にして load() を呼ぶことでブラウザがデコードバッファを解放
+      grid.querySelectorAll('video').forEach(v => {
+        v.pause();
+        v.src = '';
+        v.load();
+      });
+
+      isLoading = false;
+      grid.innerHTML = '';
+    }
+
+    // ── バッチ読み込み ────────────────────────────────
+    async function loadMore() {
+      if (isLoading || offset >= totalCount) return;
+      isLoading = true;
+
+      const sentinel   = document.getElementById('sentinel');
+      const loadingRow = document.createElement('div');
+      loadingRow.className = 'loading-row';
+      loadingRow.innerHTML = '<div class="ring"></div>';
+      if (sentinel) grid.insertBefore(loadingRow, sentinel);
+      else          grid.appendChild(loadingRow);
+
+      try {
+        const names = await window.go.main.App.GetVideoFiles(folderPath, offset, BATCH);
+        loadingRow.remove();
+
+        if (names && names.length > 0) {
+          const frag = document.createDocumentFragment();
+          for (const name of names) {
+            const url = `http://127.0.0.1:${videoPort}/${encodeURIComponent(name)}`;
+            frag.appendChild(createCard(name, url));
+          }
+          if (sentinel) grid.insertBefore(frag, sentinel);
+          else          grid.appendChild(frag);
+          offset += names.length;
+        }
+
+        if (sentinel && offset >= totalCount) {
+          sentinel.style.display = 'none';
+        }
+      } catch (err) {
+        console.error('loadMore:', err);
+        loadingRow.remove();
+      } finally {
+        isLoading = false;
+      }
+    }
+
+    // ── カード生成 ────────────────────────────────────
+    function createCard(name, url) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.title = name;
+      card._url = url; // 共有 observer からアクセス
+
+      const video = document.createElement('video');
+      video.muted      = true;
+      video.loop       = true;
+      video.playsInline = true;
+      video.preload    = 'none';
+      card._video = video;
+
+      // マウスオーバーで音声オン/オフ
+      card.addEventListener('mouseenter', () => { video.muted = false; });
+      card.addEventListener('mouseleave', () => { video.muted = true;  });
+
+      // 実際の縦横比が判明したら padding-bottom を更新（これで一切のクリップがなくなる）
+      video.addEventListener('loadedmetadata', () => {
+        if (video.videoWidth && video.videoHeight) {
+          card.style.paddingBottom =
+            (video.videoHeight / video.videoWidth * 100).toFixed(4) + '%';
+        }
+      }, { once: true });
+
+      // スピナー
+      const spin = document.createElement('div');
+      spin.className = 'card-spin';
+      spin.innerHTML = '<div class="ring"></div>';
+      spin.style.display = 'none';
+      card._spin = spin;
+
+      video.addEventListener('playing', () => { spin.style.display = 'none'; }, { once: true });
+      video.addEventListener('error',   () => { spin.style.display = 'none'; }, { once: true });
+
+      card.appendChild(video);
+      card.appendChild(spin);
+
+      // 共有 observer に登録（個別 observer は作らない）
+      loadObs.observe(card);
+      playObs.observe(card);
+
+      return card;
+    }
+
+    openBtn .addEventListener('click', openFolder);
+    emptyBtn.addEventListener('click', openFolder);
+  </script>
+</body>
+</html>
